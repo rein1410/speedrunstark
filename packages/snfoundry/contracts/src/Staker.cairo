@@ -21,7 +21,8 @@ pub trait IStaker<T> {
 
 #[starknet::contract]
 pub mod Staker {
-    use contracts::ExampleExternalContract::{
+    use core::num::traits::SaturatingSub;
+use contracts::ExampleExternalContract::{
         IExampleExternalContractDispatcher, IExampleExternalContractDispatcherTrait,
     };
     use starknet::storage::Map;
@@ -61,7 +62,7 @@ pub mod Staker {
         self.eth_token_dispatcher.write(IERC20CamelDispatcher { contract_address: eth_contract });
         self.external_contract_address.write(external_contract_address);
         // ToDo Checkpoint 2: Set the deadline to 60 seconds from now. Implement your code here.
-
+        self.deadline.write(get_block_timestamp() + 60);
     }
 
     #[abi(embed_v0)]
@@ -71,7 +72,18 @@ pub mod Staker {
         fn stake(
             ref self: ContractState, amount: u256,
         ) { // Note: In UI and Debug contract `sender` should call `approve`` before to `transfer` the amount to the staker contract
-        //self.emit(Stake { sender, amount }); // ToDo Checkpoint 1: Uncomment to emit the Stake
+        assert(self.time_left() > 0, 'Staking period has ended');
+
+        let sender = get_caller_address();
+        let this_contract = get_contract_address();
+        let dispatcher = self.eth_token_dispatcher.read();
+        dispatcher.transferFrom(sender, this_contract, amount);
+
+        // Get the staker's current staked amount, and update it
+        let current_staked_amount = self.balances(sender);
+        self.balances.write(sender, current_staked_amount + amount);
+
+        self.emit(Stake { sender, amount }); // ToDo Checkpoint 1: Uncomment to emit the Stake
         //event
         }
 
@@ -82,10 +94,30 @@ pub mod Staker {
         // `open_for_withdraw` function ToDo Checkpoint 3: Assert that the staking period has ended
         // ToDo Checkpoint 3: Protect the function calling `not_completed` function before the
         // execution
-        fn execute(ref self: ContractState) {}
+        fn execute(ref self: ContractState) {
+            assert(self.time_left() == 0, 'Staking period has not ended');
+            assert(self.not_completed(), 'Already executed');
+
+            let staked_amount = self.eth_token_dispatcher.read().balanceOf(get_contract_address());
+            if staked_amount >= self.threshold() {
+                self.complete_transfer(staked_amount)
+            } else {
+                self.open_for_withdraw.write(true)
+            }
+        }
 
         // ToDo Checkpoint 3: Implement your `withdraw` function here
-        fn withdraw(ref self: ContractState) {}
+        fn withdraw(ref self: ContractState) {
+            assert(self.open_for_withdraw(), 'Not open for withdrawal');
+
+            let staker = get_caller_address();
+            let current_staked_amount = self.balances(staker);
+            assert(current_staked_amount > 0, 'No balance to withdraw');
+
+            self.eth_token_dispatcher().transfer(staker, current_staked_amount);
+            // Deduct the staker amount
+            self.balances.write(staker, 0)
+        }
 
         fn balances(self: @ContractState, account: ContractAddress) -> u256 {
             self.balances.read(account)
@@ -117,11 +149,15 @@ pub mod Staker {
         // Read Function to check if the external contract is completed.
         // ToDo Checkpoint 3: Implement your completed function here
         fn completed(self: @ContractState) -> bool {
-            false
+            let contract_address = self.example_external_contract();
+            let external_contract_dispatcher = IExampleExternalContractDispatcher { 
+                contract_address
+            };
+            external_contract_dispatcher.completed()
         }
         // ToDo Checkpoint 2: Implement your time_left function here
         fn time_left(self: @ContractState) -> u64 {
-            0
+            self.deadline().saturating_sub(get_block_timestamp())
         }
     }
 
@@ -135,8 +171,21 @@ pub mod Staker {
         fn complete_transfer(
             ref self: ContractState, amount: u256,
         ) { // Note: Staker contract should approve to transfer the staked_amount to the external contract
+            let external_contract = self.example_external_contract();
+            let dispatcher = self.eth_token_dispatcher();
+            dispatcher.transfer(external_contract, amount);
+            let external_contract_dispatcher = IExampleExternalContractDispatcher { 
+                contract_address: external_contract 
+            };
+            external_contract_dispatcher.complete()
         }
         // ToDo Checkpoint 3: Implement your not_completed function here
-        fn not_completed(ref self: ContractState) {}
+        fn not_completed(ref self: ContractState) -> bool {
+            let external_contract = self.example_external_contract();
+            let external_contract_dispatcher = IExampleExternalContractDispatcher { 
+                contract_address: external_contract
+            };
+            external_contract_dispatcher.completed() == false
+        }
     }
 }
